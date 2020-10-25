@@ -1595,12 +1595,12 @@ bool ChatHandler::HandleDebugObjectFlags(char* args)
         if (onOff)
         {
             PSendSysMessage("%s enabled for %s.", foundCommand->command.c_str(), target->GetGuidStr().c_str());
-            target->SetDebugFlag(foundCommand->flag);
+            target->SetDebugFlag(CMDEBUGFLAG_INTERMEDIATES_POINTS);
         }
         else
         {
             PSendSysMessage("%s disabled for %s.", foundCommand->command.c_str(), target->GetGuidStr().c_str());
-            target->ClearDebugFlag(foundCommand->flag);
+            target->ClearDebugFlag(CMDEBUGFLAG_INTERMEDIATES_POINTS);
         }
     }
     else

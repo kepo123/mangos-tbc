@@ -56,10 +56,15 @@ void PathFinder::SetCurrentNavMesh()
     if (MMAP::MMapFactory::IsPathfindingEnabled(m_sourceUnit->GetMapId(), m_sourceUnit))
     {
         MMAP::MMapManager* mmap = MMAP::MMapFactory::createOrGetMMapManager();
-        if (m_defaultMapId != m_sourceUnit->GetMapId())
-            m_defaultNavMeshQuery = mmap->GetNavMeshQuery(m_sourceUnit->GetMapId(), m_sourceUnit->GetInstanceId());
+        if (GenericTransport* transport = m_sourceUnit->GetTransport())
+            m_navMeshQuery = mmap->GetModelNavMeshQuery(transport->GetDisplayId());
+        else
+        {
+            if (m_defaultMapId != m_sourceUnit->GetMapId())
+                m_defaultNavMeshQuery = mmap->GetNavMeshQuery(m_sourceUnit->GetMapId(), m_sourceUnit->GetInstanceId());
 
-        m_navMeshQuery = m_defaultNavMeshQuery;
+            m_navMeshQuery = m_defaultNavMeshQuery;
+        }
 
         if (m_navMeshQuery)
             m_navMesh = m_navMeshQuery->getAttachedNavMesh();
@@ -69,8 +74,10 @@ void PathFinder::SetCurrentNavMesh()
 bool PathFinder::calculate(float destX, float destY, float destZ, bool forceDest/* = false*/, bool straightLine/* = false*/)
 {
     float x, y, z;
-    m_sourceUnit->GetPosition(x, y, z);
+    m_sourceUnit->GetPosition(x, y, z, m_sourceUnit->GetTransport());
     Vector3 dest(destX, destY, destZ);
+    if (GenericTransport* transport = m_sourceUnit->GetTransport())
+        transport->CalculatePassengerOffset(dest.x, dest.y, dest.z);
     return calculate(Vector3(x, y, z), dest, forceDest, straightLine);
 }
 
@@ -688,8 +695,16 @@ void PathFinder::NormalizePath()
     if (!sWorld.getConfig(CONFIG_BOOL_PATH_FIND_NORMALIZE_Z))
         return;
 
+    GenericTransport* transport = m_sourceUnit->GetTransport();
+
     for (auto& m_pathPoint : m_pathPoints)
+    {
+        if (transport)
+            transport->CalculatePassengerPosition(m_pathPoint.x, m_pathPoint.y, m_pathPoint.z);
         m_sourceUnit->UpdateAllowedPositionZ(m_pathPoint.x, m_pathPoint.y, m_pathPoint.z);
+        if (transport)
+            transport->CalculatePassengerOffset(m_pathPoint.x, m_pathPoint.y, m_pathPoint.z);
+    }
 }
 
 void PathFinder::BuildShortcut()
@@ -774,6 +789,9 @@ NavTerrain PathFinder::getNavTerrain(float x, float y, float z) const
 
 bool PathFinder::HaveTile(const Vector3& p) const
 {
+    if (m_sourceUnit->GetTransport())
+        return true;
+
     int tx = -1, ty = -1;
     float point[VERTEX_SIZE] = {p.y, p.z, p.x};
 

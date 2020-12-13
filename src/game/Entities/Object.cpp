@@ -24,9 +24,11 @@
 #include "World/World.h"
 #include "Entities/Creature.h"
 #include "Entities/Player.h"
+#include "Entities/GameObject.h"
 #include "Globals/ObjectMgr.h"
 #include "Entities/ObjectGuid.h"
 #include "Entities/UpdateData.h"
+#include "Entities/Transports.h"
 #include "UpdateMask.h"
 #include "Util.h"
 #include "Grids/CellImpl.h"
@@ -41,6 +43,7 @@
 #include "Chat/Chat.h"
 #include "Loot/LootMgr.h"
 #include "Spells/SpellMgr.h"
+#include "MotionGenerators/PathFinder.h"
 
 #include "Custom/CPlayer.h"
 
@@ -157,9 +160,9 @@ void Object::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) c
             case HighGuid::HIGHGUID_PLAYER:
             case HighGuid::HIGHGUID_UNIT:
             case HighGuid::HIGHGUID_GAMEOBJECT:
+            case HighGuid::HIGHGUID_TRANSPORT:
                 updatetype = UPDATETYPE_CREATE_OBJECT2;
                 break;
-
             default:
                 break;
         }
@@ -167,7 +170,7 @@ void Object::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) c
 
     if (isType(TYPEMASK_UNIT))
     {
-        if (((Unit*) this)->GetVictim())
+        if (static_cast<Unit const*>(this)->GetVictim() && static_cast<Unit const*>(this)->hasUnitState(UNIT_STAT_MELEE_ATTACKING))
             updateFlags |= UPDATEFLAG_HAS_ATTACKING_TARGET;
     }
 
@@ -253,21 +256,16 @@ void Object::BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const
     // 0x20
     if (updateFlags & UPDATEFLAG_LIVING)
     {
-        Unit* unit = ((Unit*)this);
+        Unit const* unit = static_cast<Unit const*>(this);
 
-        if (GetTypeId() == TYPEID_PLAYER)
-        {
-            Player* player = ((Player*)unit);
-            if (player->GetTransport())
-                player->m_movementInfo->AddMovementFlag(MOVEFLAG_ONTRANSPORT);
-            else
-                player->m_movementInfo->RemoveMovementFlag(MOVEFLAG_ONTRANSPORT);
-        }
+        // TODO: Remove this when moveflag is properly used
+        if (unit->GetTransport())
+            const_cast<Unit*>(unit)->m_movementInfo.AddMovementFlag(MOVEFLAG_ONTRANSPORT);
+        else
+            const_cast<Unit*>(unit)->m_movementInfo.RemoveMovementFlag(MOVEFLAG_ONTRANSPORT);
 
-        // Update movement info time
-        unit->m_movementInfo->UpdateTime(WorldTimer::getMSTime());
         // Write movement info
-        unit->m_movementInfo->Write(*data);
+        *data << unit->m_movementInfo;
 
         // Unit speeds
         *data << float(unit->GetSpeed(MOVE_WALK));
@@ -287,19 +285,21 @@ void Object::BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const
     else if (updateFlags & UPDATEFLAG_HAS_POSITION)
     {
         // 0x02
-        if (updateFlags & UPDATEFLAG_TRANSPORT && ((GameObject*)this)->GetGoType() == GAMEOBJECT_TYPE_MO_TRANSPORT)
+        if (updateFlags & UPDATEFLAG_TRANSPORT)
         {
-            *data << float(0);
-            *data << float(0);
-            *data << float(0);
-            *data << float(((WorldObject*)this)->GetOrientation());
+            GameObject const* go = static_cast<GameObject const*>(this);
+            *data << float(go->GetStationaryX());
+            *data << float(go->GetStationaryY());
+            *data << float(go->GetStationaryZ());
+            *data << float(go->GetStationaryO());
         }
         else
         {
-            *data << float(((WorldObject*)this)->GetPositionX());
-            *data << float(((WorldObject*)this)->GetPositionY());
-            *data << float(((WorldObject*)this)->GetPositionZ());
-            *data << float(((WorldObject*)this)->GetOrientation());
+            WorldObject const* wo = static_cast<WorldObject const*>(this);
+            *data << float(wo->GetPositionX());
+            *data << float(wo->GetPositionY());
+            *data << float(wo->GetPositionZ());
+            *data << float(wo->GetOrientation());
         }
     }
 
@@ -351,10 +351,10 @@ void Object::BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const
     }
 
     // 0x4
-    if (updateFlags & UPDATEFLAG_HAS_ATTACKING_TARGET)      // packed guid (current target guid)
+    if (updateFlags & UPDATEFLAG_HAS_ATTACKING_TARGET) // packed guid (current melee attack target guid)
     {
-        if (((Unit*) this)->GetVictim())
-            *data << ((Unit*) this)->GetVictim()->GetPackGUID();
+        if (static_cast<Unit const*>(this)->GetVictim())
+            *data << static_cast<Unit const*>(this)->GetVictim()->GetPackGUID();
         else
             data->appendPackGUID(0);
     }
@@ -362,7 +362,11 @@ void Object::BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const
     // 0x2
     if (updateFlags & UPDATEFLAG_TRANSPORT)
     {
-        *data << uint32(WorldTimer::getMSTime());           // ms time
+        GameObject const* go = static_cast<GameObject const*>(this);
+        if (go && go->IsMoTransport())
+            *data << uint32(static_cast<Transport const*>(go)->GetPathProgress());
+        else
+            *data << uint32(go->GetMap()->GetCurrentMSTime());
     }
 }
 
@@ -563,11 +567,11 @@ void Object::BuildValuesUpdate(uint8 updatetype, ByteBuffer* data, UpdateMask* u
                     uint32 dynflagsValue = m_uint32Values[index];
 
                     // Checking SPELL_AURA_EMPATHY and caster
-                    if (dynflagsValue & UNIT_DYNFLAG_SPECIALINFO && ((Unit*) this)->IsAlive())
+                    if (dynflagsValue & UNIT_DYNFLAG_SPECIALINFO && static_cast<const Unit*>(this)->IsAlive())
                     {
                         bool bIsEmpathy = false;
                         bool bIsCaster = false;
-                        Unit::AuraList const& mAuraEmpathy = ((Unit*)this)->GetAurasByType(SPELL_AURA_EMPATHY);
+                        Unit::AuraList const& mAuraEmpathy = static_cast<const Unit*>(this)->GetAurasByType(SPELL_AURA_EMPATHY);
                         for (Unit::AuraList::const_iterator itr = mAuraEmpathy.begin(); !bIsCaster && itr != mAuraEmpathy.end(); ++itr)
                         {
                             bIsEmpathy = true;              // Empathy by aura set
@@ -642,7 +646,7 @@ void Object::BuildValuesUpdate(uint8 updatetype, ByteBuffer* data, UpdateMask* u
 
                     if (GetTypeId() == TYPEID_UNIT || GetTypeId() == TYPEID_PLAYER)
                     {
-                        Unit* unit = (Unit*)this; // hunters mark effects should only be visible to owners and not all players
+                        Unit const* unit = static_cast<const Unit*>(this); // hunters mark effects should only be visible to owners and not all players
                         if (!unit->HasAuraTypeWithCaster(SPELL_AURA_MOD_STALKED, target->GetObjectGuid()))
                             dynflagsValue &= ~UNIT_DYNFLAG_TRACK_UNIT;
                     }
@@ -1122,7 +1126,7 @@ WorldObject::WorldObject() :
     m_transportInfo(nullptr), m_isOnEventNotified(false),
     m_visibilityData(this), m_currMap(nullptr),
     m_mapId(0), m_InstanceId(0),
-    m_isActiveObject(false), m_debugFlags(0)
+    m_isActiveObject(false), m_debugFlags(0), m_transport(nullptr)
 {
 }
 
@@ -1144,10 +1148,7 @@ void WorldObject::Relocate(float x, float y, float z, float orientation)
     m_position.o = orientation;
 
     if (isType(TYPEMASK_UNIT))
-        ((Unit*)this)->m_movementInfo->ChangePosition(x, y, z, orientation);
-
-    if (isType(TYPEMASK_PLAYER))
-        this->ToCPlayer()->HandleRelocate(x, y, z, orientation);
+        m_movementInfo.ChangePosition(x, y, z, orientation);
 }
 
 void WorldObject::Relocate(float x, float y, float z)
@@ -1157,10 +1158,7 @@ void WorldObject::Relocate(float x, float y, float z)
     m_position.z = z;
 
     if (isType(TYPEMASK_UNIT))
-        ((Unit*)this)->m_movementInfo->ChangePosition(x, y, z, GetOrientation());
-
-    if (isType(TYPEMASK_PLAYER))
-        this->ToCPlayer()->HandleRelocate(x, y, z, GetOrientation());
+        m_movementInfo.ChangePosition(x, y, z, GetOrientation());
 }
 
 void WorldObject::SetOrientation(float orientation)
@@ -1168,7 +1166,7 @@ void WorldObject::SetOrientation(float orientation)
     m_position.o = orientation;
 
     if (isType(TYPEMASK_UNIT))
-        ((Unit*)this)->m_movementInfo->ChangeOrientation(orientation);
+        m_movementInfo.ChangeOrientation(orientation);
 }
 
 uint32 WorldObject::GetZoneId() const
@@ -1222,11 +1220,12 @@ float WorldObject::GetDistance(const WorldObject* obj, bool is3D, DistanceCalcul
     }
 }
 
-float WorldObject::GetDistance(float x, float y, float z, DistanceCalculation distcalc) const
+float WorldObject::GetDistance(float x, float y, float z, DistanceCalculation distcalc, bool transport) const
 {
-    float dx = GetPositionX() - x;
-    float dy = GetPositionY() - y;
-    float dz = GetPositionZ() - z;
+    Position pos = GetPosition(transport ? GetTransport() : nullptr);
+    float dx = pos.x - x;
+    float dy = pos.y - y;
+    float dz = pos.z - z;
     float dist = dx * dx + dy * dy + dz * dz;
 
     switch (distcalc)
@@ -1576,45 +1575,78 @@ void WorldObject::UpdateAllowedPositionZ(float x, float y, float& z, Map* atMap 
         z = ground_z;
 }
 
-void WorldObject::MovePositionToFirstCollision(WorldLocation &pos, float dist, float angle)
+void WorldObject::MovePositionToFirstCollision(Position& pos, float dist, float angle)
 {
-    float destX = pos.coord_x + dist * cos(angle);
-    float destY = pos.coord_y + dist * sin(angle);
-    float destZ = pos.coord_z;
+    float destX = pos.x + dist * cos(angle);
+    float destY = pos.y + dist * sin(angle);
+    float destZ = pos.z;
+
+    GenericTransport* transport = GetTransport();
+
+    float halfHeight = GetCollisionHeight();
+    if (IsUnit())
+    {
+        PathFinder path(static_cast<Unit*>(this));
+        path.calculate(destX, destY, destZ + halfHeight, false, true);
+        if (path.getPathType())
+        {
+            G3D::Vector3 result = path.getPath().back();
+            destX = result.x;
+            destY = result.y;
+            destZ = result.z;
+            if (transport) // transport produces offset, but we need global pos
+                transport->CalculatePassengerPosition(destX, destY, destZ);
+        }
+    }
 
     UpdateAllowedPositionZ(destX, destY, destZ);
-    bool colPoint = GetMap()->GetHitPosition(pos.coord_x, pos.coord_y, pos.coord_z + 0.5f, destX, destY, destZ, -0.5f);
+    destZ += halfHeight;
+    bool colPoint = GetMap()->GetHitPosition(pos.x, pos.y, pos.z + halfHeight, destX, destY, destZ, -0.5f);
+    destZ -= halfHeight;
 
     if (colPoint)
     {
         destX -= CONTACT_DISTANCE * cos(angle);
         destY -= CONTACT_DISTANCE * sin(angle);
-        dist = sqrt((pos.coord_x - destX)*(pos.coord_x - destX) + (pos.coord_y - destY)*(pos.coord_y - destY));
+        dist = sqrt((pos.x - destX) * (pos.x - destX) + (pos.y - destY) * (pos.y - destY));
     }
 
+    colPoint = GetMap()->GetHitPosition(destX, destY, destZ + halfHeight, destX, destY, destZ, -0.5f);
+    if (colPoint)
+        dist = sqrt((pos.x - destX) * (pos.x - destX) + (pos.y - destY) * (pos.y - destY));
+
     float step = dist / 10.0f;
+    Position tempPos(destX, destY, destZ, 0.f);
+    bool distanceZSafe = true;
+    float previousZ = destZ;
 
     for (int i = 0; i < 10; i++)
     {
-        if (fabs(pos.coord_z - destZ) > ATTACK_DISTANCE)
+        if (fabs(pos.z - destZ) > ATTACK_DISTANCE)
         {
+            previousZ = destZ;
             destX -= step * cos(angle);
             destY -= step * sin(angle);
             UpdateAllowedPositionZ(destX, destY, destZ);
+            if (fabs(previousZ - destZ) > (ATTACK_DISTANCE / 2))
+                distanceZSafe = false;
         }
         else
         {
-            pos.coord_x = destX;
-            pos.coord_y = destY;
-            pos.coord_z = destZ;
+            pos.x = destX;
+            pos.y = destY;
+            pos.z = destZ;
             break;
         }
     }
 
-    MaNGOS::NormalizeMapCoord(pos.coord_x);
-    MaNGOS::NormalizeMapCoord(pos.coord_y);
-    UpdateAllowedPositionZ(pos.coord_x, pos.coord_y, pos.coord_z);
-    pos.orientation = m_position.o;
+    if (distanceZSafe)
+        pos = tempPos;
+
+    MaNGOS::NormalizeMapCoord(pos.x);
+    MaNGOS::NormalizeMapCoord(pos.y);
+    UpdateAllowedPositionZ(pos.x, pos.y, pos.z);
+    pos.o = m_position.o;
 }
 
 float WorldObject::GetCombinedCombatReach(WorldObject const* pVictim, bool forMeleeRange, float flat_mod) const
@@ -1853,6 +1885,22 @@ void WorldObject::AddObjectToRemoveList()
     GetMap()->AddObjectToRemoveList(this);
 }
 
+void WorldObject::GetPosition(float& x, float& y, float& z, GenericTransport* transport) const
+{
+    if (transport && m_movementInfo.t_guid == transport->GetObjectGuid())
+    {
+        x = m_movementInfo.t_pos.x;
+        y = m_movementInfo.t_pos.y;
+        z = m_movementInfo.t_pos.z;
+        return;
+    }
+    x = GetPositionX();
+    y = GetPositionY();
+    z = GetPositionZ();
+    if (transport)
+        transport->CalculatePassengerOffset(x, y, z);
+}
+
 Creature* WorldObject::SummonCreature(TempSpawnSettings settings, Map* map)
 {
     CreatureInfo const* cinfo = ObjectMgr::GetCreatureTemplate(settings.entry);
@@ -1862,9 +1910,20 @@ Creature* WorldObject::SummonCreature(TempSpawnSettings settings, Map* map)
         return nullptr;
     }
 
-    TemporarySpawn* creature = new TemporarySpawn(settings.spawner ? settings.spawner->GetObjectGuid() : ObjectGuid());
+    TemporarySpawn* creature;
+    if (!settings.tempSpawnMovegen)
+        creature = new TemporarySpawn(settings.spawner ? settings.spawner->GetObjectGuid() : ObjectGuid());
+    else
+        creature = new TemporarySpawnWaypoint(settings.spawner ? settings.spawner->GetObjectGuid() : ObjectGuid(), settings.waypointId, settings.spawnPathId, settings.pathOrigin);
 
-    CreatureCreatePos pos(map, settings.x, settings.y, settings.z, settings.ori);
+    GenericTransport* transport = nullptr;
+    if (settings.spawner)
+        transport = settings.spawner->GetTransport();
+    float x = settings.x, y = settings.y, z = settings.z;
+    if (transport)
+        transport->CalculatePassengerPosition(x, y, z);
+
+    CreatureCreatePos pos(map, x, y, z, settings.ori);
 
     if (settings.x == 0.0f && settings.y == 0.0f && settings.z == 0.0f && settings.spawner)
     {
@@ -1879,6 +1938,13 @@ Creature* WorldObject::SummonCreature(TempSpawnSettings settings, Map* map)
     }
 
     creature->SetRespawnCoord(pos);
+    if (transport)
+    {
+        creature->m_movementInfo.t_pos.x = settings.x;
+        creature->m_movementInfo.t_pos.y = settings.y;
+        creature->m_movementInfo.t_pos.z = settings.z;
+        creature->m_movementInfo.t_pos.o = settings.ori;
+    }
 
     // Set run or walk before any other movement starts
     creature->SetWalk(!settings.setRun);
@@ -1897,12 +1963,47 @@ Creature* WorldObject::SummonCreature(TempSpawnSettings settings, Map* map)
 
     creature->GetMotionMaster()->SetDefaultPathId(settings.pathId);
 
+    if (settings.spawner)
+    {
+        if (GenericTransport* transport = settings.spawner->GetTransport())
+        {
+            transport->AddPassenger(creature);
+            transport->UpdatePassengerPosition(creature);
+        }
+    }
+
+    if (settings.spawnDataEntry)
+    {
+        if (CreatureSpawnTemplate const* templateData = sObjectMgr.GetCreatureSpawnTemplate(settings.spawnDataEntry))
+        {
+            if (templateData->unitFlags != -1)
+                creature->SetUInt32Value(UNIT_FIELD_FLAGS, uint32(templateData->unitFlags));
+            if (templateData->faction > 0)
+                creature->SetPower(POWER_MANA, templateData->curMana);
+            if (templateData->modelId > 0)
+                creature->SetDisplayId(templateData->modelId);
+            if (templateData->equipmentId)
+                creature->LoadEquipment(templateData->equipmentId == -1 ? 0 : templateData->equipmentId, true);
+            if (templateData->curHealth > 1)
+                creature->SetHealth(templateData->curHealth);
+            if (templateData->curMana > 0)
+                creature->SetPower(POWER_MANA, templateData->curMana);
+            if (templateData->IsRunning())
+                creature->SetWalk(false);
+            if (templateData->IsHovering())
+                creature->SetHover(true);
+        }
+    }
+
     creature->Summon(settings.spawnType, settings.despawnTime);                  // Also initializes the AI and MMGen
     if (settings.corpseDespawnTime)
         creature->SetCorpseDelay(settings.corpseDespawnTime);
 
     if (settings.spellId)
         creature->SetUInt32Value(UNIT_CREATED_BY_SPELL, settings.spellId);
+
+    if (settings.ownerGuid)
+        creature->SetOwnerGuid(settings.ownerGuid);
 
     if (settings.spawner && settings.spawner->GetTypeId() == TYPEID_UNIT)
         if (Creature* spawnerCreature = static_cast<Creature*>(settings.spawner))
@@ -2781,4 +2882,21 @@ float Position::GetAngle(const float x, const float y) const
     float ang = atan2(dy, dx);                              // returns value between -Pi..Pi
     ang = (ang >= 0) ? ang : 2 * M_PI_F + ang;
     return ang;
+}
+
+float Position::GetDistance(Position const& other) const
+{
+    float dx = GetPositionX() - other.GetPositionX();
+    float dy = GetPositionY() - other.GetPositionY();
+    float distsq = dx * dx + dy * dy;
+
+    float dz = GetPositionZ() - other.GetPositionZ();
+    distsq += dz * dz;
+
+    return distsq;
+}
+
+bool operator!=(const Position& left, const Position& right)
+{
+    return left.x != right.x || left.y != right.y || left.z != right.z || left.o != right.o;
 }
